@@ -66,7 +66,8 @@ export async function submitSolutionsInPage(previousTaskId, allowSameTaskId, rul
         return {
           ok: response.ok,
           status: response.status,
-          data: responseData
+          data: responseData,
+          error: response.ok ? null : responseData?.message || `HTTP ${response.status}`
         };
       } catch (error) {
         return {
@@ -75,6 +76,75 @@ export async function submitSolutionsInPage(previousTaskId, allowSameTaskId, rul
           error: error.message
         };
       }
+    }
+
+    async function getJson(path) {
+      const response = await fetch(path, {
+        credentials: "include",
+        mode: "same-origin",
+        signal: AbortSignal.timeout(15000)
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${path}`);
+      }
+      return response.json();
+    }
+
+    function findCheckButton() {
+      for (const selector of rules.checkSelectors || []) {
+        for (const element of document.querySelectorAll(selector)) {
+          const button = element.closest("button, [role='button']") || element;
+          const rect = button.getBoundingClientRect();
+          const style = window.getComputedStyle(button);
+          if (!button.disabled && button.getAttribute("aria-disabled") !== "true" &&
+              rect.width > 0 && rect.height > 0 &&
+              style.display !== "none" && style.visibility !== "hidden") {
+            return button;
+          }
+        }
+      }
+      return null;
+    }
+
+    async function checkServerTask(taskId, task) {
+      if (task.solved) {
+        return withLogs({ success: true, taskId, results: [{ ok: true, status: 200 }], kind: "server-check" });
+      }
+
+      let button = findCheckButton();
+      const readyDeadline = Date.now() + (rules.serverCheckReadyTimeoutMs || 15000);
+      while (!button && Date.now() < readyDeadline) {
+        await wait(rules.serverCheckPollMs);
+        if (extractTaskId(window.location.href) !== taskId) {
+          return withLogs({ success: false, taskId, error: "Страница задания изменилась до проверки" });
+        }
+        button = findCheckButton();
+      }
+      if (!button) {
+        return withLogs({ success: false, taskId, error: "Кнопка проверки серверного задания пока недоступна" });
+      }
+
+      log("Запускаю штатную серверную проверку текущего кода", { taskId });
+      button.click();
+      const deadline = Date.now() + rules.serverCheckTimeoutMs;
+
+      while (Date.now() < deadline) {
+        await wait(rules.serverCheckPollMs);
+        if (extractTaskId(window.location.href) !== taskId) {
+          return withLogs({ success: false, taskId, error: "Страница задания изменилась во время проверки" });
+        }
+        const updatedTask = await getJson(`/api/tasks/${taskId}/`);
+        if (updatedTask.solved) {
+          log("Серверная проверка засчитана", { taskId });
+          return withLogs({ success: true, taskId, results: [{ ok: true, status: 200 }], kind: "server-check" });
+        }
+      }
+
+      return withLogs({
+        success: false,
+        taskId,
+        error: "Серверная проверка не засчитана за отведённое время. Проверь код и результат проверки в тренажёре"
+      });
     }
 
     const taskId = extractTaskId(window.location.href);
@@ -99,6 +169,15 @@ export async function submitSolutionsInPage(previousTaskId, allowSameTaskId, rul
       });
     }
 
+    const task = await getJson(`/api/tasks/${taskId}/`);
+    if (!task.lesson_id) {
+      return withLogs({ success: false, taskId, error: "Не удалось определить урок задания" });
+    }
+    const lesson = await getJson(`/api/lessons/${task.lesson_id}/`);
+    if ((rules.serverTrainerTypes || []).includes(lesson.lesson_type)) {
+      return await checkServerTask(taskId, task);
+    }
+
     const results = [];
 
     for (let index = 0; index < rules.requestCount; index += 1) {
@@ -106,13 +185,17 @@ export async function submitSolutionsInPage(previousTaskId, allowSameTaskId, rul
         await wait(rules.requestSpacingMs);
       }
 
-      results.push(await sendRequest(taskId));
+      const result = await sendRequest(taskId);
+      results.push(result);
+      if (!result.ok) {
+        break;
+      }
     }
 
     console.log("Все запросы выполнены:", results);
     log("Запросы завершены", { taskId, results });
 
-    if (results.some((result) => result.status !== null)) {
+    if (results.length === rules.requestCount && results.every((result) => result.ok)) {
       return withLogs({ success: true, taskId, results });
     }
 
