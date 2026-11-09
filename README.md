@@ -7,6 +7,12 @@ Chrome MV3 extension for automating Yandex Practicum flow:
 - continues to the next task automatically
 - writes detailed diagnostic logs to a local file
 
+Client-side tasks use the solutions API. For server-checked `react` trainers,
+the extension clicks the trainer's normal Check button and waits until the API
+reports the task as solved. Enter a valid solution in the editor before starting
+this mode. It checks the current code; it does not generate TypeScript or React
+solutions. A rejected HTTP response stops the cycle and reports its error.
+
 ## Documentation
 
 GitHub does not render repository HTML files as a styled README.  
@@ -63,4 +69,10 @@ Follow logs:
 
 ```bash
 tail -f task-solver.log
+```
+
+Run regression tests with Node.js:
+
+```bash
+node --test test/pageActions.test.mjs
 ```
